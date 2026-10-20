@@ -19,7 +19,7 @@ app.add_middleware(
         "https://artemk15.github.io",
     ],
     allow_credentials=False,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "X-Telegram-Init-Data"],
 )
 
