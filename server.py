@@ -9,7 +9,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-
+ADMIN_ID = os.getenv("ADMIN_ID", "")
 app = FastAPI(title="KUZYA STARS SHOP API")
 
 # Разрешаем запросы с нашего сайта Mini App.
