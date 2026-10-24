@@ -3,6 +3,8 @@ import json
 import hmac
 import hashlib
 import time
+import sqlite3
+from datetime import datetime, timezone, timedelta
 from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, Header, HTTPException
@@ -10,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = os.getenv("ADMIN_ID", "")
+ANALYTICS_DB = os.getenv("ANALYTICS_DB", "analytics.db")
 app = FastAPI(title="KUZYA STARS SHOP API")
 
 # Разрешаем запросы с нашего сайта Mini App.
@@ -127,3 +130,93 @@ async def current_user(
         "telegram_id": user["id"],
         "first_name": user.get("first_name", ""),
     }
+
+
+def analytics_connection():
+    conn = sqlite3.connect(ANALYTICS_DB, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_analytics_db():
+    with analytics_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS analytics_visits (
+                session_id TEXT PRIMARY KEY,
+                telegram_id INTEGER NOT NULL,
+                opened_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS analytics_presence (
+                telegram_id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                last_seen REAL NOT NULL
+            )
+        """)
+        conn.commit()
+
+
+init_analytics_db()
+
+
+def require_admin(init_data: str) -> dict:
+    user = verify_telegram_init_data(init_data)
+    if not ADMIN_ID or str(user.get("id")) != str(ADMIN_ID):
+        raise HTTPException(status_code=403, detail="Нет доступа к аналитике")
+    return user
+
+
+@app.post("/api/analytics/heartbeat")
+async def analytics_heartbeat(payload: dict):
+    user = verify_telegram_init_data(str(payload.get("initData", "")))
+    session_id = str(payload.get("sessionId", "")).strip()
+    if not session_id or len(session_id) > 100:
+        raise HTTPException(status_code=400, detail="Некорректная сессия")
+    now = time.time()
+    opened_at = datetime.now(timezone.utc).isoformat()
+    with analytics_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO analytics_visits(session_id, telegram_id, opened_at) VALUES (?, ?, ?)",
+            (session_id, user["id"], opened_at),
+        )
+        conn.execute(
+            "INSERT INTO analytics_presence(telegram_id, session_id, last_seen) VALUES (?, ?, ?) "
+            "ON CONFLICT(telegram_id) DO UPDATE SET session_id=excluded.session_id, last_seen=excluded.last_seen",
+            (user["id"], session_id, now),
+        )
+        conn.commit()
+    return {"ok": True, "active_window_seconds": 60}
+
+
+@app.post("/api/admin/analytics")
+async def admin_analytics(payload: dict):
+    require_admin(str(payload.get("initData", "")))
+    now = time.time()
+    today = datetime.now(timezone.utc).date().isoformat()
+    with analytics_connection() as conn:
+        active = conn.execute(
+            "SELECT COUNT(*) AS n FROM analytics_presence WHERE last_seen >= ?", (now - 60,)
+        ).fetchone()["n"]
+        visits = conn.execute("SELECT COUNT(*) AS n FROM analytics_visits").fetchone()["n"]
+        unique_visitors = conn.execute(
+            "SELECT COUNT(DISTINCT telegram_id) AS n FROM analytics_visits"
+        ).fetchone()["n"]
+        today_visits = conn.execute(
+            "SELECT COUNT(*) AS n FROM analytics_visits WHERE substr(opened_at, 1, 10) = ?",
+            (today,),
+        ).fetchone()["n"]
+        rows = conn.execute(
+            "SELECT substr(opened_at,1,10) AS day, COUNT(*) AS visits, "
+            "COUNT(DISTINCT telegram_id) AS visitors FROM analytics_visits "
+            "GROUP BY substr(opened_at,1,10) ORDER BY day DESC LIMIT 7"
+        ).fetchall()
+    return {
+        "active_now": active,
+        "total_visits": visits,
+        "unique_visitors": unique_visitors,
+        "today_visits": today_visits,
+        "daily": [dict(row) for row in reversed(rows)],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
